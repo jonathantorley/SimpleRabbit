@@ -14,59 +14,48 @@ namespace SimpleRabbit.NetCore
     /// </summary>
     /// <typeparam name="TKey">The key to use for ordering</typeparam>
     /// <typeparam name="TValue">The value to work on</typeparam>
-    public abstract class AsyncMessageHandler<TKey, TValue> : IMessageHandler
+    public abstract class AsyncMessageHandler<TKey, TValue> : QueuingMessageHandler<TKey, AsyncMessageHandler<TKey, TValue>.Context>
     {
-        private readonly ILogger<AsyncMessageHandler<TKey, TValue>> _logger;
-        private readonly TaskQueueManager<TKey> _messageQueueManager;
-
-
-        protected AsyncMessageHandler(ILogger<AsyncMessageHandler<TKey, TValue>> logger)
+        private class DelegatingHandler : IProcessor
         {
-            _logger = logger;
-            _messageQueueManager = new TaskQueueManager<TKey>();
-        }
+            public AsyncMessageHandler<TKey, TValue> Delegation { get; set; }
 
-        protected AsyncMessageHandler(ILogger<AsyncMessageHandler<TKey, TValue>> logger,
-            Dictionary<TKey, Task> dictionary)
-        {
-            _logger = logger;
-            _messageQueueManager = new TaskQueueManager<TKey>(dictionary);
-        }
 
-        /// <summary>
-        ///     This method is required for IMessageHandler implementation.
-        /// </summary>
-        /// <returns></returns>
-        public abstract bool CanProcess(string tag);
-
-        /// <summary>
-        ///     This method is run sequentially. The number of tasks will be dependent on the prefetch setting in Rabbit.
-        /// </summary>
-        /// <param name="message"></param>
-        /// <returns></returns>
-        public bool Process(BasicMessage message)
-        {
-            try
+            public bool CanProcess(string tag)
             {
-                var item = Get(message);
-                var key = GetKey(item);
+                return Delegation.CanProcess(tag);
+            }
 
-                _logger.LogDebug($"Processing message for {key}");
-                if (key == null)
+            public Task<TKey> GetKeyAsync(BasicMessage message, out Context context)
+            {
+                var item = Delegation.Get(message);
+                var key = Delegation.GetKey(item);
+                context = new Context()
                 {
-                    _logger.LogInformation($"Message ignored {message.Properties?.MessageId} -> {message.Body}, no key");
-                    return true;
-                }
+                    Item = item,
+                };
+                return Task.FromResult(key);
+            }
 
-                // Enforce thread safety when manipulating the dictionary of running tasks
-                _messageQueueManager.EnqueueTask(key, t => ProcessMessage(t, message, key, item));
-                return false;
-            }
-            catch (Exception e)
+            public Task ProcessAsync(BasicMessage message, Context context)
             {
-                _logger.LogError(e, $"Error Processing message {message.Body}, {e.Message}");
-                throw;
+                return Delegation.ProcessAsync(context.Item);
             }
+        }
+
+        public class Context
+        {
+            public TValue Item { get; set; }
+        }
+
+        protected AsyncMessageHandler(ILogger<AsyncMessageHandler<TKey, TValue>> logger) :base(new DelegatingHandler(), logger)
+        {
+            (_handler as DelegatingHandler).Delegation = this;
+        }
+
+        protected AsyncMessageHandler(ILogger<AsyncMessageHandler<TKey, TValue>> logger, Dictionary<TKey, Task> dictionary) : base(new DelegatingHandler(), logger)
+        {
+            (_handler as DelegatingHandler).Delegation = this;
         }
 
         /// <summary>
@@ -83,39 +72,6 @@ namespace SimpleRabbit.NetCore
         /// <returns>The decomposed message</returns>
         protected abstract TKey GetKey(TValue item);
 
-        private async Task ProcessMessage(Task previousQueueTask, BasicMessage message, TKey key, TValue item)
-        {
-            await Task.Yield();
-
-            if (!previousQueueTask.IsCompletedSuccessfully)
-            {
-                message.Nack();
-                throw new Exception($"Processing chain aborted for {key}");
-            }
-
-            try
-            {
-                await ProcessAsync(item);
-                message.Ack();
-            }
-            catch (Exception e)
-            {
-                _logger.LogError(e, $"Couldn't process: {e.Message} key: {key} tag: ({message.DeliveryTag})");
-                if (e is AggregateException agg)
-                {
-                    foreach (var ex in agg.InnerExceptions)
-                    {
-                        _logger.LogError(ex, ex.Message);
-                    }
-                }
-
-                message.ErrorAction();
-                throw;
-            }
-        }
-
         protected abstract Task ProcessAsync(TValue item);
-
-        
     }
 }

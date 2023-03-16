@@ -37,11 +37,11 @@ namespace SimpleRabbit.NetCore.Service
             /// <param name="message">The RabbitMQ message. It is possible to <see cref="BasicMessage.Ack"/> or <see cref="BasicMessage.Nack(bool)"/> the message at this point, and the <see cref="QueuingMessageHandler{TKey, TContext}"/> will skip sending an ACK (or NACK) to RabbitMQ.</param>
             /// <param name="context">The context for this message, created during the <see cref="GetKeyAsync(BasicMessage, out TContext)"/> call.</param>
             /// <returns>An awaitable <see cref="Task"/> that will complete when the work has been performed.</returns>
-            Task ProcessAsync(BasicMessage message, ref TContext context);
+            Task ProcessAsync(BasicMessage message, TContext context);
         }
 
         private readonly TaskQueueManager<TKey> _queueManager;
-        private readonly IProcessor _handler;
+        private protected readonly IProcessor _handler; // Private protected to allow the AsyncMessageHandler to get at it
         private readonly ILogger _logger;
 
         /// <summary>
@@ -52,6 +52,18 @@ namespace SimpleRabbit.NetCore.Service
         public QueuingMessageHandler(IProcessor handler, ILogger<QueuingMessageHandler<TKey, TContext>> logger)
         {
             _queueManager = new TaskQueueManager<TKey>();
+            _handler = handler;
+            _logger = logger;
+        }
+
+        /// <summary>
+        /// Create an instance of the <see cref="QueuingMessageHandler{TKey, TContext}"/> using a <see cref="TaskQueueManager{TKey}"/> instantiated with the provided dictionary.
+        /// </summary>
+        /// <param name="handler">The handler instance that contains the logic for the message handler.</param>
+        /// <param name="logger">A logger to use in the event of errors.</param>
+        public QueuingMessageHandler(IProcessor handler, ILogger<QueuingMessageHandler<TKey, TContext>> logger, Dictionary<TKey, Task> tasks)
+        {
+            _queueManager = new TaskQueueManager<TKey>(tasks);
             _handler = handler;
             _logger = logger;
         }
@@ -102,7 +114,7 @@ namespace SimpleRabbit.NetCore.Service
 
             try
             {
-                await _handler.ProcessAsync(message, ref context);
+                await _handler.ProcessAsync(message, context);
                 if (!message.IsHandled)
                     message.Ack();
             }
