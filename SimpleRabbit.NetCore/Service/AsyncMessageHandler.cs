@@ -14,21 +14,20 @@ namespace SimpleRabbit.NetCore
     public abstract class AsyncMessageHandler<TKey, TValue> : IMessageHandler
     {
         private readonly ILogger<AsyncMessageHandler<TKey, TValue>> _logger;
+        private readonly MessageQueueManager _messageQueueManager;
 
-        private readonly Dictionary<TKey, Task> _tasks;
-        private readonly object _lock = new object();
 
         protected AsyncMessageHandler(ILogger<AsyncMessageHandler<TKey, TValue>> logger)
         {
             _logger = logger;
-            _tasks = new Dictionary<TKey, Task>();
+            _messageQueueManager = new MessageQueueManager();
         }
 
         protected AsyncMessageHandler(ILogger<AsyncMessageHandler<TKey, TValue>> logger,
             Dictionary<TKey, Task> dictionary)
         {
             _logger = logger;
-            _tasks = dictionary;
+            _messageQueueManager = new MessageQueueManager(dictionary);
         }
 
         /// <summary>
@@ -57,19 +56,7 @@ namespace SimpleRabbit.NetCore
                 }
 
                 // Enforce thread safety when manipulating the dictionary of running tasks
-                lock (_lock)
-                {
-                    CleanUpTasks();
-
-                    if (!_tasks.TryGetValue(key, out var task))
-                    {
-                        task = Task.CompletedTask;
-                    }
-
-                    // save the task at the end of the queues.
-                    var tailTask = ContinueTaskQueue(task, message, key, item);
-                    _tasks[key] = tailTask; // add completed task to the to be used.
-                }
+                _messageQueueManager.EnqueueTask(key, t => ProcessMessage(t, message, key, item));
                 return false;
             }
             catch (Exception e)
@@ -93,50 +80,74 @@ namespace SimpleRabbit.NetCore
         /// <returns>The decomposed message</returns>
         protected abstract TKey GetKey(TValue item);
 
-        private void CleanUpTasks()
+        private async Task ProcessMessage(Task previousQueueTask, BasicMessage message, TKey key, TValue item)
         {
-            var completed = _tasks
-                .Where(t => t.Value?.IsCompleted ?? true)
-                .Select(t => t.Key)
-                .ToArray();
-            foreach (var key in completed)
+            await Task.Yield();
+
+            if (!previousQueueTask.IsCompletedSuccessfully)
             {
-                _tasks.Remove(key);
+                message.Nack();
+                throw new Exception($"Processing chain aborted for {key}");
+            }
+
+            try
+            {
+                await ProcessAsync(item);
+                message.Ack();
+            }
+            catch (Exception e)
+            {
+                _logger.LogError(e, $"Couldn't process: {e.Message} key: {key} tag: ({message.DeliveryTag})");
+                if (e is AggregateException agg)
+                {
+                    foreach (var ex in agg.InnerExceptions)
+                    {
+                        _logger.LogError(ex, ex.Message);
+                    }
+                }
+
+                message.ErrorAction();
+                throw;
             }
         }
 
-        private Task ContinueTaskQueue(Task task, BasicMessage message, TKey key, TValue item)
-        {
-            return task.ContinueWith(async t =>
-            {
-                if (!t.IsCompletedSuccessfully)
-                {
-                    message.Nack();
-                    throw new Exception($"Processing chain aborted for {key}");
-                }
+        protected abstract Task ProcessAsync(TValue item);
 
-                try
+        private class MessageQueueManager
+        {
+            private readonly Dictionary<TKey, Task> _tasks;
+            private readonly object _lock = new object();
+
+            public MessageQueueManager() : this(new Dictionary<TKey, Task>())
+            {
+            }
+
+            public MessageQueueManager(Dictionary<TKey, Task> tasks)
+            {
+                _tasks = tasks;
+            }
+
+            public void EnqueueTask(TKey key, Func<Task, Task> continuation)
+            {
+                lock (_lock)
                 {
-                    await ProcessAsync(item);
-                    message.Ack();
-                }
-                catch (Exception e)
-                {
-                    _logger.LogError(e, $"Couldn't process: {e.Message} key: {key} tag: ({message.DeliveryTag})");
-                    if (e is AggregateException agg)
+                    // Clean up the existing tasks
+                    var completedTaskKeys = _tasks
+                        .Where(t => t.Value?.IsCompleted ?? true)
+                        .Select(t => t.Key)
+                        .ToArray();
+                    foreach (var completedTask in completedTaskKeys)
                     {
-                        foreach (var ex in agg.InnerExceptions)
-                        {
-                            _logger.LogError(ex, ex.Message);
-                        }
+                        _tasks.Remove(completedTask);
                     }
 
-                    message.ErrorAction();
-                    throw;
-                }
-            }).Unwrap();
-        }
+                    if (!_tasks.TryGetValue(key, out var currentTask))
+                        currentTask = Task.CompletedTask;
 
-        protected abstract Task ProcessAsync(TValue item);
+                    var newTask = currentTask.ContinueWith(continuation);
+                    _tasks[key] = newTask;
+                }
+            }
+        }
     }
 }
