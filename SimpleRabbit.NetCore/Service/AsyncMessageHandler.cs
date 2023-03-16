@@ -3,9 +3,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using SimpleRabbit.NetCore.Service;
 
 namespace SimpleRabbit.NetCore
 {
+    
+
     /// <summary>
     ///     A task queue based ordered dispatcher
     /// </summary>
@@ -14,20 +17,20 @@ namespace SimpleRabbit.NetCore
     public abstract class AsyncMessageHandler<TKey, TValue> : IMessageHandler
     {
         private readonly ILogger<AsyncMessageHandler<TKey, TValue>> _logger;
-        private readonly MessageQueueManager _messageQueueManager;
+        private readonly TaskQueueManager<TKey> _messageQueueManager;
 
 
         protected AsyncMessageHandler(ILogger<AsyncMessageHandler<TKey, TValue>> logger)
         {
             _logger = logger;
-            _messageQueueManager = new MessageQueueManager();
+            _messageQueueManager = new TaskQueueManager<TKey>();
         }
 
         protected AsyncMessageHandler(ILogger<AsyncMessageHandler<TKey, TValue>> logger,
             Dictionary<TKey, Task> dictionary)
         {
             _logger = logger;
-            _messageQueueManager = new MessageQueueManager(dictionary);
+            _messageQueueManager = new TaskQueueManager<TKey>(dictionary);
         }
 
         /// <summary>
@@ -113,41 +116,6 @@ namespace SimpleRabbit.NetCore
 
         protected abstract Task ProcessAsync(TValue item);
 
-        private class MessageQueueManager
-        {
-            private readonly Dictionary<TKey, Task> _tasks;
-            private readonly object _lock = new object();
-
-            public MessageQueueManager() : this(new Dictionary<TKey, Task>())
-            {
-            }
-
-            public MessageQueueManager(Dictionary<TKey, Task> tasks)
-            {
-                _tasks = tasks;
-            }
-
-            public void EnqueueTask(TKey key, Func<Task, Task> continuation)
-            {
-                lock (_lock)
-                {
-                    // Clean up the existing tasks
-                    var completedTaskKeys = _tasks
-                        .Where(t => t.Value?.IsCompleted ?? true)
-                        .Select(t => t.Key)
-                        .ToArray();
-                    foreach (var completedTask in completedTaskKeys)
-                    {
-                        _tasks.Remove(completedTask);
-                    }
-
-                    if (!_tasks.TryGetValue(key, out var currentTask))
-                        currentTask = Task.CompletedTask;
-
-                    var newTask = currentTask.ContinueWith(continuation);
-                    _tasks[key] = newTask;
-                }
-            }
-        }
+        
     }
 }
