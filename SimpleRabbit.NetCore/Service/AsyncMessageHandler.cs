@@ -26,7 +26,7 @@ namespace SimpleRabbit.NetCore
                 return Delegation.CanProcess(tag);
             }
 
-            public Task<TKey> GetKeyAsync(BasicMessage message, out Context context)
+            public TKey GetKey(BasicMessage message, out Context context)
             {
                 var item = Delegation.Get(message);
                 var key = Delegation.GetKey(item);
@@ -34,7 +34,7 @@ namespace SimpleRabbit.NetCore
                 {
                     Item = item,
                 };
-                return Task.FromResult(key);
+                return key;
             }
 
             public Task ProcessAsync(BasicMessage message, Context context)

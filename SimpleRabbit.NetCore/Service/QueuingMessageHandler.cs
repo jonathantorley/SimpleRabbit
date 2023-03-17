@@ -29,7 +29,7 @@ namespace SimpleRabbit.NetCore.Service
             /// <param name="message">The RabbitMQ message.</param>
             /// <param name="context">A context that can be created for this message, which will be passed to the <see cref="ProcessAsync(BasicMessage, ref TContext)"/> function.</param>
             /// <returns>An awaitable <see cref="Task"/> that contains the key.</returns>
-            Task<TKey> GetKeyAsync(BasicMessage message, out TContext context);
+            TKey GetKey(BasicMessage message, out TContext context);
 
             /// <summary>
             /// Process the given message.
@@ -74,22 +74,25 @@ namespace SimpleRabbit.NetCore.Service
         /// <inheritdoc/>
         public bool Process(BasicMessage message)
         {
-            Task.Run(async () =>
+            try
             {
-                var key = await _handler.GetKeyAsync(message, out var context);
+                var key = _handler.GetKey(message, out var context);
+                _logger.LogDebug($"Processing message for {key}");
                 if (key == null)
                 {
-                    if (!message.IsHandled)
-                    {
-                        _logger.LogInformation($"Message ignored {message.Properties?.MessageId} -> {message.Body}, no key");
-                        message.Ack();
-                    }
-                    return;
+                    _logger.LogInformation($"Message ignored {message.Properties?.MessageId} -> {message.Body}, no key");
+                    return true;
                 }
 
                 _queueManager.EnqueueTask(key, previousTask => ProcessMessage(previousTask, message, key, context));
-            });
-            return false;
+
+                return false;
+            }
+            catch (Exception e)
+            {
+                _logger.LogError(e, $"Error Processing message {message.Body}, {e.Message}");
+                throw;
+            }
         }
 
         /// <summary>

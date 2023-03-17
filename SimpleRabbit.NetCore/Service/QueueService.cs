@@ -98,9 +98,7 @@ namespace SimpleRabbit.NetCore
             var message = new BasicMessage(args, channel, _queueServiceParams.QueueName, () => OnError(sender, args));
             try
             {
-                
-
-                if (_handler.Process(message))
+                if (_handler.Process(message) && !message.IsHandled)
                 {
                     message.Ack();
                 }
